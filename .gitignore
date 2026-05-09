@@ -1,0 +1,11 @@
+# build artefacts
+limber.exe
+rsrc.syso
+
+# runtime / user state
+limber.log
+config.json
+
+# Go
+*.test
+*.prof
