@@ -101,6 +101,10 @@ type Scheduler struct {
 	popupIsTest bool // current popup was triggered by Test menu — survives the working-hours gate
 	queue       []queued
 
+	// daily total of active (non-idle) seconds; resets on local-day rollover.
+	totalWorkingSec int
+	totalWorkingDay int // YYYYMMDD; 0 means "not initialised yet"
+
 	// captured state for status display
 	statusMu sync.Mutex
 	status   Status
@@ -132,6 +136,17 @@ type Status struct {
 	NextFullKind    Tier // TierFull or TierFullRest — what would fire next at the full threshold
 	NextNearestKind Tier // tier whose counter is closest to firing (overall next break)
 	PopupActive     bool
+
+	// Snooze state — populated when at least one tier has a pending snooze.
+	// SnoozeTier / SnoozeElapsed / SnoozeTotal describe the soonest-to-expire
+	// snooze; SnoozeElapsed grows from 0 to SnoozeTotal as the timer drains.
+	SnoozeActive  bool
+	SnoozeTier    Tier
+	SnoozeElapsed int
+	SnoozeTotal   int
+
+	// Active (non-idle) seconds since local 00:00 of the current day.
+	TotalWorkingSec int
 }
 
 // New builds a Scheduler bound to the given config and activity provider.
@@ -295,6 +310,18 @@ func (s *Scheduler) tick() {
 	idle := s.act.IdleSeconds()
 	working := s.cfg.WithinWorkingHours(now)
 
+	// Daily total of non-idle time. Tracked independently of working hours,
+	// pause, and snooze — this is just "calendar-day clock time the user was
+	// at the keyboard". Resets on local-midnight rollover.
+	today := dayKey(now)
+	if s.totalWorkingDay != today {
+		s.totalWorkingSec = 0
+		s.totalWorkingDay = today
+	}
+	if idle < s.cfg.IdleResetSeconds {
+		s.totalWorkingSec++
+	}
+
 	// Working-hours gate: full reset whenever we're outside, EXCEPT we don't
 	// touch a popup that was opened via the Test menu (the user explicitly
 	// asked to see it; the working-hours auto-close was killing it within a
@@ -358,9 +385,18 @@ func (s *Scheduler) tick() {
 		return
 	}
 
-	// Normal tick.
-	s.microActive++
-	s.fullActive++
+	// Normal tick. While ANY tier is in pending-snooze, freeze all break
+	// counters: snooze time should "only be calculated in total working
+	// time" (which we already incremented at the top of this function).
+	// The snoozed-tier popup is still due — its countdown drains below — but
+	// the rest of the schedule is paused so the user isn't penalised for
+	// snoozing (e.g. a snoozed micro doesn't shorten the gap to the next
+	// full break).
+	snoozing := len(s.pendSnooze) > 0
+	if !snoozing {
+		s.microActive++
+		s.fullActive++
+	}
 
 	// Drain snooze countdowns.
 	for tier, sec := range s.pendSnooze {
@@ -373,21 +409,32 @@ func (s *Scheduler) tick() {
 		}
 	}
 
-	// Threshold checks.
-	if !s.firedFor[TierMicro] && s.microActive >= s.cfg.Tiers.Micro.IntervalMin*60 {
-		s.firedFor[TierMicro] = true
-		s.log.Info("threshold reached", "tier", "micro", "active", s.microActive)
-		s.fireOrQueue(TierMicro, false)
-	}
-	if !s.firedFor[TierFull] && !s.firedFor[TierFullRest] &&
-		s.fullActive >= s.cfg.Tiers.Full.IntervalMin*60 {
-		kind := s.nextFullKind()
-		s.firedFor[kind] = true
-		s.log.Info("threshold reached", "tier", kind.String(), "active", s.fullActive, "fullCount", s.fullCount)
-		s.fireOrQueue(kind, false)
+	// Threshold checks. Skip while snoozing — no counter advanced this tick,
+	// so nothing new can have crossed a threshold anyway, but the explicit
+	// guard keeps the intent obvious.
+	if !snoozing {
+		if !s.firedFor[TierMicro] && s.microActive >= s.cfg.Tiers.Micro.IntervalMin*60 {
+			s.firedFor[TierMicro] = true
+			s.log.Info("threshold reached", "tier", "micro", "active", s.microActive)
+			s.fireOrQueue(TierMicro, false)
+		}
+		if !s.firedFor[TierFull] && !s.firedFor[TierFullRest] &&
+			s.fullActive >= s.cfg.Tiers.Full.IntervalMin*60 {
+			kind := s.nextFullKind()
+			s.firedFor[kind] = true
+			s.log.Info("threshold reached", "tier", kind.String(), "active", s.fullActive, "fullCount", s.fullCount)
+			s.fireOrQueue(kind, false)
+		}
 	}
 
 	s.updateStatus(working, idle)
+}
+
+// dayKey collapses a local time to YYYYMMDD so we can detect midnight rollover
+// with a single integer compare. 0 is reserved for "uninitialised".
+func dayKey(t time.Time) int {
+	y, m, d := t.Date()
+	return y*10000 + int(m)*100 + d
 }
 
 func (s *Scheduler) fireOrQueue(tier Tier, idle bool) {
@@ -498,6 +545,28 @@ func (s *Scheduler) updateStatus(working bool, idle int) {
 	if microRem > fullRem {
 		nearest = nextFull
 	}
+
+	// Pick the snooze closest to expiring (smallest remaining). In practice
+	// only one popup at a time can be snoozed, so this map is usually 0 or 1
+	// entries — but the code stays correct if multiple ever queue up.
+	var (
+		snoozeActive    bool
+		snoozeTier      Tier
+		snoozeRemaining int
+	)
+	for tier, rem := range s.pendSnooze {
+		if !snoozeActive || rem < snoozeRemaining {
+			snoozeActive = true
+			snoozeTier = tier
+			snoozeRemaining = rem
+		}
+	}
+	snoozeTotal := s.cfg.Popup.SnoozeMinutes * 60
+	snoozeElapsed := snoozeTotal - snoozeRemaining
+	if snoozeElapsed < 0 {
+		snoozeElapsed = 0
+	}
+
 	st := Status{
 		Paused:          s.paused,
 		InWorkingHours:  working,
@@ -508,6 +577,11 @@ func (s *Scheduler) updateStatus(working bool, idle int) {
 		NextFullKind:    nextFull,
 		NextNearestKind: nearest,
 		PopupActive:     s.popupActive,
+		SnoozeActive:    snoozeActive,
+		SnoozeTier:      snoozeTier,
+		SnoozeElapsed:   snoozeElapsed,
+		SnoozeTotal:     snoozeTotal,
+		TotalWorkingSec: s.totalWorkingSec,
 	}
 	s.statusMu.Lock()
 	s.status = st

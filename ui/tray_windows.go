@@ -70,22 +70,35 @@ func (a *App) refreshTooltip() {
 	_ = a.ni.SetToolTip(formatTooltip(a.Sched.Snapshot(), a.paused))
 }
 
-// formatTooltip produces e.g. "0:14 to short break - Since last full: 3:47".
-// Outside working hours all counters are held at zero so the message degrades
-// to a simple status line. When paused the live numbers are still useful (the
-// counters are frozen, not reset), so we keep them and prefix "Paused".
+// formatTooltip produces e.g. "0:14 to short break - Since last full: 3:47 -
+// Total working time: 03:45". When the user has snoozed the active popup, the
+// first segment switches to "<type> snoozed: <elapsed>/<total>sec" so they
+// can see how long until the snoozed break re-fires. Outside working hours
+// most counters are held at zero so the message collapses to a status line +
+// the (still-running) total. Paused state keeps the live numbers visible.
 func formatTooltip(s scheduler.Status, paused bool) string {
+	totalSeg := "Total working time: " + formatHHMMpadded(s.TotalWorkingSec)
+
 	if !s.InWorkingHours && !paused {
-		return "Limber - outside working hours"
+		return "Outside working hours - " + totalSeg
 	}
-	var rem int
-	if s.NextNearestKind == scheduler.TierMicro {
-		rem = s.MicroRemaining
+
+	var first string
+	if s.SnoozeActive {
+		first = fmt.Sprintf("%s snoozed: %d/%dsec",
+			tierShortLabel(s.SnoozeTier), s.SnoozeElapsed, s.SnoozeTotal)
 	} else {
-		rem = s.FullRemaining
+		var rem int
+		if s.NextNearestKind == scheduler.TierMicro {
+			rem = s.MicroRemaining
+		} else {
+			rem = s.FullRemaining
+		}
+		first = fmt.Sprintf("%s to %s", formatHHMM(rem), tierShortLabel(s.NextNearestKind))
 	}
-	base := fmt.Sprintf("%s to %s - Since last full: %s",
-		formatHHMM(rem), tierShortLabel(s.NextNearestKind), formatHHMM(s.FullActive))
+
+	base := fmt.Sprintf("%s - Since last full: %s - %s",
+		first, formatHHMM(s.FullActive), totalSeg)
 	if paused {
 		return "Paused - " + base
 	}
@@ -99,6 +112,18 @@ func formatHHMM(seconds int) string {
 	h := seconds / 3600
 	m := (seconds % 3600) / 60
 	return fmt.Sprintf("%d:%02d", h, m)
+}
+
+// formatHHMMpadded is like formatHHMM but pads the hour to two digits — used
+// for the daily total so the tooltip's last segment lines up visually
+// regardless of whether the user has worked < 10 h or ≥ 10 h.
+func formatHHMMpadded(seconds int) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	return fmt.Sprintf("%02d:%02d", h, m)
 }
 
 func tierShortLabel(t scheduler.Tier) string {
