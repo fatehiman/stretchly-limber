@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/lxn/walk"
 	d "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 
 	"limber/config"
 	"limber/logger"
@@ -290,15 +292,36 @@ func (a *App) openSettings() {
 		},
 	}
 
-	// Use the declarative Run(owner) — it does Create + show-modal + return
-	// the result code in one call. The two-step Create+dlg.Run() pattern was
-	// leaking the dialog's WM_QUIT into the parent message loop on close,
-	// which exited the whole app with status 2.
+	// Walk's declarative Dialog.Run centres the dialog on its owner. Our
+	// owner is the hidden 1×1 toolwindow tucked off-screen at (-32000,-32000)
+	// so without intervention the dialog lands offscreen / at (0,0). We can't
+	// switch to a Create+dlg.Run() split — that was reintroducing a WM_QUIT
+	// leak that exited the whole app on close. Instead, temporarily move the
+	// owner to the centre of the primary work area for the duration of Run;
+	// walk centres the dialog on owner.X/Y regardless of dialog or owner
+	// size, so this lands the dialog at screen centre. Restore the owner's
+	// off-screen position afterwards.
+	mwHwnd := a.mw.Handle()
+	var workArea win.RECT
+	movedOwner := false
+	if win.SystemParametersInfo(spiGetWorkArea, 0, unsafe.Pointer(&workArea), 0) {
+		cx := int32(workArea.Left) + (workArea.Right-workArea.Left)/2
+		cy := int32(workArea.Top) + (workArea.Bottom-workArea.Top)/2
+		win.SetWindowPos(mwHwnd, 0, cx, cy, 0, 0,
+			win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)
+		movedOwner = true
+	}
+
 	result, err := form.Run(a.mw)
 	if err != nil {
 		a.Log.Error("settings dialog", "err", err)
 	}
 	a.Log.Debug("settings dialog closed", "result", result)
+
+	if movedOwner {
+		win.SetWindowPos(mwHwnd, 0, -32000, -32000, 0, 0,
+			win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)
+	}
 	// walk's modal-dialog teardown can leave the owner shown — re-hide it
 	// explicitly so the empty Limber window doesn't linger after the dialog.
 	a.mw.SetVisible(false)
