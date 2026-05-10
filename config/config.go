@@ -39,6 +39,7 @@ type RotationItem struct {
 }
 
 type MicroTier struct {
+	Enabled      bool   `json:"enabled"`
 	IntervalMin  int    `json:"intervalMin"`
 	DurationSec  int    `json:"durationSec"`
 	Image        string `json:"image"`
@@ -46,13 +47,15 @@ type MicroTier struct {
 }
 
 type FullTier struct {
+	Enabled     bool           `json:"enabled"`
 	IntervalMin int            `json:"intervalMin"`
 	DurationSec int            `json:"durationSec"`
 	Rotation    []RotationItem `json:"rotation"`
 }
 
 type FullRestTier struct {
-	EveryNthFull int    `json:"everyNthFull"`
+	Enabled      bool   `json:"enabled"`
+	IntervalMin  int    `json:"intervalMin"`
 	DurationSec  int    `json:"durationSec"`
 	Image        string `json:"image"`
 	Instructions string `json:"instructions"`
@@ -102,12 +105,14 @@ func Default() *Config {
 		LogLevel:    "info",
 		Tiers: Tiers{
 			Micro: MicroTier{
+				Enabled:      true,
 				IntervalMin:  20,
 				DurationSec:  20,
 				Image:        "eye_2020.jpg",
 				Instructions: "Look at something at least 20 feet (6 m) away for 20 seconds.",
 			},
 			Full: FullTier{
+				Enabled:     true,
 				IntervalMin: 30,
 				DurationSec: 60,
 				Rotation: []RotationItem{
@@ -124,7 +129,8 @@ func Default() *Config {
 				},
 			},
 			FullRest: FullRestTier{
-				EveryNthFull: 3,
+				Enabled:      true,
+				IntervalMin:  90,
 				DurationSec:  900,
 				Image:        "walk_break.jpg",
 				Instructions: "Stand up, walk a few minutes, look around the room, do a full-body stretch.",

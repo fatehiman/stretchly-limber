@@ -84,15 +84,21 @@ func formatTooltip(s scheduler.Status, paused bool) string {
 	}
 
 	var first string
-	if s.SnoozeActive {
+	switch {
+	case s.SnoozeActive:
 		first = fmt.Sprintf("%s snoozed: %d/%dsec",
 			tierShortLabel(s.SnoozeTier), s.SnoozeElapsed, s.SnoozeTotal)
-	} else {
+	case !s.AnyEnabled:
+		first = "no breaks enabled"
+	default:
 		var rem int
-		if s.NextNearestKind == scheduler.TierMicro {
+		switch s.NextNearestKind {
+		case scheduler.TierMicro:
 			rem = s.MicroRemaining
-		} else {
+		case scheduler.TierFull:
 			rem = s.FullRemaining
+		case scheduler.TierFullRest:
+			rem = s.FullRestRemaining
 		}
 		first = fmt.Sprintf("%s to %s", formatHHMM(rem), tierShortLabel(s.NextNearestKind))
 	}

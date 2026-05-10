@@ -84,10 +84,10 @@ type Scheduler struct {
 	events  chan Event
 
 	// internal state — only touched by Run.
-	microActive int
-	fullActive  int
-	fullCount   int
-	fullRotIdx  int
+	microActive     int
+	fullActive      int
+	fullRestActive  int
+	fullRotIdx      int
 
 	firedFor    map[Tier]bool
 	snoozeCount map[Tier]int
@@ -127,15 +127,23 @@ const (
 
 // Status is a snapshot of internal counters for diagnostics / tray tooltip.
 type Status struct {
-	Paused          bool
-	InWorkingHours  bool
-	IdleSec         int
-	MicroRemaining  int
-	FullRemaining   int
-	FullActive      int  // seconds of active time since last full / full-rest break completed
-	NextFullKind    Tier // TierFull or TierFullRest — what would fire next at the full threshold
-	NextNearestKind Tier // tier whose counter is closest to firing (overall next break)
-	PopupActive     bool
+	Paused         bool
+	InWorkingHours bool
+	IdleSec        int
+
+	// Per-tier enable flags (mirror of cfg.Tiers.*.Enabled, captured per-tick
+	// for stable display).
+	MicroEnabled    bool
+	FullEnabled     bool
+	FullRestEnabled bool
+	AnyEnabled      bool
+
+	MicroRemaining    int
+	FullRemaining     int
+	FullRestRemaining int
+	FullActive        int  // seconds of active time since last regular Full break completed
+	NextNearestKind   Tier // enabled tier whose counter is closest to firing
+	PopupActive       bool
 
 	// Snooze state — populated when at least one tier has a pending snooze.
 	// SnoozeTier / SnoozeElapsed / SnoozeTotal describe the soonest-to-expire
@@ -285,13 +293,11 @@ func (s *Scheduler) completeTier(tier Tier) {
 		s.microActive = 0
 	case TierFull:
 		s.fullActive = 0
-		s.fullCount++
 		if rot := s.cfg.Tiers.Full.Rotation; len(rot) > 0 {
 			s.fullRotIdx = (s.fullRotIdx + 1) % len(rot)
 		}
 	case TierFullRest:
-		s.fullActive = 0
-		s.fullCount++
+		s.fullRestActive = 0
 	}
 }
 
@@ -352,8 +358,9 @@ func (s *Scheduler) tick() {
 	if isIdle && !s.inIdle {
 		s.inIdle = true
 		s.log.Info("idle entered", "idleSec", idle, "threshold", threshold)
-		// Fire idle popup if no popup is showing.
-		if !s.popupActive {
+		// Fire idle popup if no popup is showing AND at least one tier is
+		// enabled (otherwise there's no break to remind about).
+		if !s.popupActive && s.anyTierEnabled() {
 			tier := s.nextNearestKind()
 			s.popupActive = true
 			s.popupIsIdle = true
@@ -391,43 +398,76 @@ func (s *Scheduler) tick() {
 	// The snoozed-tier popup is still due — its countdown drains below — but
 	// the rest of the schedule is paused so the user isn't penalised for
 	// snoozing (e.g. a snoozed micro doesn't shorten the gap to the next
-	// full break).
+	// full break). Disabled tiers also stay frozen — re-enabling resumes
+	// from where the counter left off rather than instant-firing.
 	snoozing := len(s.pendSnooze) > 0
 	if !snoozing {
-		s.microActive++
-		s.fullActive++
+		if s.cfg.Tiers.Micro.Enabled {
+			s.microActive++
+		}
+		if s.cfg.Tiers.Full.Enabled {
+			s.fullActive++
+		}
+		if s.cfg.Tiers.FullRest.Enabled {
+			s.fullRestActive++
+		}
 	}
 
-	// Drain snooze countdowns.
+	// Drain snooze countdowns. If the tier was disabled mid-snooze (rare —
+	// settings save during a pending re-fire), discard the pending snooze
+	// rather than firing it.
 	for tier, sec := range s.pendSnooze {
 		sec--
 		if sec <= 0 {
 			delete(s.pendSnooze, tier)
-			s.fireOrQueue(tier, false)
+			if s.tierEnabled(tier) {
+				s.fireOrQueue(tier, false)
+			}
 		} else {
 			s.pendSnooze[tier] = sec
 		}
 	}
 
-	// Threshold checks. Skip while snoozing — no counter advanced this tick,
-	// so nothing new can have crossed a threshold anyway, but the explicit
-	// guard keeps the intent obvious.
+	// Threshold checks per tier. Each is now independent — full and full-rest
+	// no longer share a counter; full-rest fires on its own intervalMin.
 	if !snoozing {
-		if !s.firedFor[TierMicro] && s.microActive >= s.cfg.Tiers.Micro.IntervalMin*60 {
+		if s.cfg.Tiers.Micro.Enabled && !s.firedFor[TierMicro] &&
+			s.microActive >= s.cfg.Tiers.Micro.IntervalMin*60 {
 			s.firedFor[TierMicro] = true
 			s.log.Info("threshold reached", "tier", "micro", "active", s.microActive)
 			s.fireOrQueue(TierMicro, false)
 		}
-		if !s.firedFor[TierFull] && !s.firedFor[TierFullRest] &&
+		if s.cfg.Tiers.Full.Enabled && !s.firedFor[TierFull] &&
 			s.fullActive >= s.cfg.Tiers.Full.IntervalMin*60 {
-			kind := s.nextFullKind()
-			s.firedFor[kind] = true
-			s.log.Info("threshold reached", "tier", kind.String(), "active", s.fullActive, "fullCount", s.fullCount)
-			s.fireOrQueue(kind, false)
+			s.firedFor[TierFull] = true
+			s.log.Info("threshold reached", "tier", "full", "active", s.fullActive)
+			s.fireOrQueue(TierFull, false)
+		}
+		if s.cfg.Tiers.FullRest.Enabled && !s.firedFor[TierFullRest] &&
+			s.fullRestActive >= s.cfg.Tiers.FullRest.IntervalMin*60 {
+			s.firedFor[TierFullRest] = true
+			s.log.Info("threshold reached", "tier", "full-rest", "active", s.fullRestActive)
+			s.fireOrQueue(TierFullRest, false)
 		}
 	}
 
 	s.updateStatus(working, idle)
+}
+
+func (s *Scheduler) tierEnabled(t Tier) bool {
+	switch t {
+	case TierMicro:
+		return s.cfg.Tiers.Micro.Enabled
+	case TierFull:
+		return s.cfg.Tiers.Full.Enabled
+	case TierFullRest:
+		return s.cfg.Tiers.FullRest.Enabled
+	}
+	return false
+}
+
+func (s *Scheduler) anyTierEnabled() bool {
+	return s.cfg.Tiers.Micro.Enabled || s.cfg.Tiers.Full.Enabled || s.cfg.Tiers.FullRest.Enabled
 }
 
 // dayKey collapses a local time to YYYYMMDD so we can detect midnight rollover
@@ -498,34 +538,42 @@ func (s *Scheduler) tierContent(tier Tier) (title, imgPath, instr string, dur ti
 	return "Break", "", "", 30 * time.Second
 }
 
-// nextNearestKind picks the tier whose counter is closest to firing.
-// Used for idle and Test commands.
+// nextNearestKind picks the enabled tier whose counter is closest to firing.
+// Used for idle and Test commands. If no tier is enabled, falls back to
+// TierMicro so callers always get a deterministic answer (Test, in that
+// degenerate case, would still pop a micro reminder).
 func (s *Scheduler) nextNearestKind() Tier {
-	microRem := s.cfg.Tiers.Micro.IntervalMin*60 - s.microActive
-	fullRem := s.cfg.Tiers.Full.IntervalMin*60 - s.fullActive
-	if microRem <= fullRem {
+	type cand struct {
+		tier Tier
+		rem  int
+	}
+	var best cand
+	have := false
+	consider := func(t Tier, rem int) {
+		if !have || rem < best.rem {
+			best = cand{t, rem}
+			have = true
+		}
+	}
+	if s.cfg.Tiers.Micro.Enabled {
+		consider(TierMicro, s.cfg.Tiers.Micro.IntervalMin*60-s.microActive)
+	}
+	if s.cfg.Tiers.Full.Enabled {
+		consider(TierFull, s.cfg.Tiers.Full.IntervalMin*60-s.fullActive)
+	}
+	if s.cfg.Tiers.FullRest.Enabled {
+		consider(TierFullRest, s.cfg.Tiers.FullRest.IntervalMin*60-s.fullRestActive)
+	}
+	if !have {
 		return TierMicro
 	}
-	return s.nextFullKind()
-}
-
-// nextFullKind decides whether the next full-tier firing would be a regular
-// Full or a FullRest, based on the running count of completed full breaks.
-func (s *Scheduler) nextFullKind() Tier {
-	every := s.cfg.Tiers.FullRest.EveryNthFull
-	if every <= 0 {
-		every = 3
-	}
-	if (s.fullCount+1)%every == 0 {
-		return TierFullRest
-	}
-	return TierFull
+	return best.tier
 }
 
 func (s *Scheduler) fullReset() {
 	s.microActive = 0
 	s.fullActive = 0
-	s.fullCount = 0
+	s.fullRestActive = 0
 	s.fullRotIdx = 0
 	s.firedFor = map[Tier]bool{}
 	s.snoozeCount = map[Tier]int{}
@@ -540,11 +588,8 @@ func (s *Scheduler) fullReset() {
 func (s *Scheduler) updateStatus(working bool, idle int) {
 	microRem := max0(s.cfg.Tiers.Micro.IntervalMin*60 - s.microActive)
 	fullRem := max0(s.cfg.Tiers.Full.IntervalMin*60 - s.fullActive)
-	nextFull := s.nextFullKind()
-	nearest := TierMicro
-	if microRem > fullRem {
-		nearest = nextFull
-	}
+	fullRestRem := max0(s.cfg.Tiers.FullRest.IntervalMin*60 - s.fullRestActive)
+	nearest := s.nextNearestKind()
 
 	// Pick the snooze closest to expiring (smallest remaining). In practice
 	// only one popup at a time can be snoozed, so this map is usually 0 or 1
@@ -568,20 +613,24 @@ func (s *Scheduler) updateStatus(working bool, idle int) {
 	}
 
 	st := Status{
-		Paused:          s.paused,
-		InWorkingHours:  working,
-		IdleSec:         idle,
-		MicroRemaining:  microRem,
-		FullRemaining:   fullRem,
-		FullActive:      s.fullActive,
-		NextFullKind:    nextFull,
-		NextNearestKind: nearest,
-		PopupActive:     s.popupActive,
-		SnoozeActive:    snoozeActive,
-		SnoozeTier:      snoozeTier,
-		SnoozeElapsed:   snoozeElapsed,
-		SnoozeTotal:     snoozeTotal,
-		TotalWorkingSec: s.totalWorkingSec,
+		Paused:            s.paused,
+		InWorkingHours:    working,
+		IdleSec:           idle,
+		MicroEnabled:      s.cfg.Tiers.Micro.Enabled,
+		FullEnabled:       s.cfg.Tiers.Full.Enabled,
+		FullRestEnabled:   s.cfg.Tiers.FullRest.Enabled,
+		MicroRemaining:    microRem,
+		FullRemaining:     fullRem,
+		FullRestRemaining: fullRestRem,
+		FullActive:        s.fullActive,
+		NextNearestKind:   nearest,
+		AnyEnabled:        s.anyTierEnabled(),
+		PopupActive:       s.popupActive,
+		SnoozeActive:      snoozeActive,
+		SnoozeTier:        snoozeTier,
+		SnoozeElapsed:     snoozeElapsed,
+		SnoozeTotal:       snoozeTotal,
+		TotalWorkingSec:   s.totalWorkingSec,
 	}
 	s.statusMu.Lock()
 	s.status = st
@@ -608,6 +657,8 @@ func resolveImage(name string) string {
 // Dump returns a human-readable snapshot useful for debug logging.
 func (s *Scheduler) Dump() string {
 	st := s.Snapshot()
-	return fmt.Sprintf("paused=%v working=%v idle=%ds micro=%ds full=%ds nextFull=%s popup=%v",
-		st.Paused, st.InWorkingHours, st.IdleSec, st.MicroRemaining, st.FullRemaining, st.NextFullKind, st.PopupActive)
+	return fmt.Sprintf("paused=%v working=%v idle=%ds micro=%ds full=%ds fullRest=%ds nearest=%s popup=%v",
+		st.Paused, st.InWorkingHours, st.IdleSec,
+		st.MicroRemaining, st.FullRemaining, st.FullRestRemaining,
+		st.NextNearestKind, st.PopupActive)
 }

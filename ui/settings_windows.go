@@ -32,20 +32,21 @@ func (a *App) openSettings() {
 
 	// Field bindings.
 	var (
-		workStartLE, workEndLE                                   *walk.LineEdit
-		idleResetNE                                              *walk.NumberEdit
-		startAtBootCB                                            *walk.CheckBox
-		logLevelCB                                               *walk.ComboBox
-		cornerCB                                                 *walk.ComboBox
+		workStartLE, workEndLE                                                  *walk.LineEdit
+		idleResetNE                                                             *walk.NumberEdit
+		startAtBootCB                                                           *walk.CheckBox
+		logLevelCB                                                              *walk.ComboBox
+		cornerCB                                                                *walk.ComboBox
 		popupWNE, popupHNE, hpadNE, vpadNE, edgeTrigNE, edgeDwellNE, snoozeMinNE *walk.NumberEdit
-		audioEnabledCB                                           *walk.CheckBox
-		microIntNE, microDurNE                                   *walk.NumberEdit
-		microImgCB                                               *walk.ComboBox
-		microInstrLE                                             *walk.LineEdit
-		fullIntNE, fullDurNE                                     *walk.NumberEdit
-		fullRestEveryNE, fullRestDurNE                           *walk.NumberEdit
-		fullRestImgCB                                            *walk.ComboBox
-		fullRestInstrLE                                          *walk.LineEdit
+		audioEnabledCB                                                          *walk.CheckBox
+		microEnabledCB, fullEnabledCB, fullRestEnabledCB                        *walk.CheckBox
+		microIntNE, microDurNE                                                  *walk.NumberEdit
+		microImgCB                                                              *walk.ComboBox
+		microInstrLE                                                            *walk.LineEdit
+		fullIntNE, fullDurNE                                                    *walk.NumberEdit
+		fullRestIntNE, fullRestDurNE                                            *walk.NumberEdit
+		fullRestImgCB                                                           *walk.ComboBox
+		fullRestInstrLE                                                         *walk.LineEdit
 	)
 
 	corners := []string{"top-left", "top-right", "bottom-left", "bottom-right"}
@@ -83,6 +84,9 @@ func (a *App) openSettings() {
 			if i := indexOf(logLevels, def.LogLevel); i >= 0 {
 				logLevelCB.SetCurrentIndex(i)
 			}
+			microEnabledCB.SetChecked(def.Tiers.Micro.Enabled)
+			fullEnabledCB.SetChecked(def.Tiers.Full.Enabled)
+			fullRestEnabledCB.SetChecked(def.Tiers.FullRest.Enabled)
 			microIntNE.SetValue(float64(def.Tiers.Micro.IntervalMin))
 			microDurNE.SetValue(float64(def.Tiers.Micro.DurationSec))
 			if i := indexOf(images, def.Tiers.Micro.Image); i >= 0 {
@@ -91,7 +95,7 @@ func (a *App) openSettings() {
 			microInstrLE.SetText(def.Tiers.Micro.Instructions)
 			fullIntNE.SetValue(float64(def.Tiers.Full.IntervalMin))
 			fullDurNE.SetValue(float64(def.Tiers.Full.DurationSec))
-			fullRestEveryNE.SetValue(float64(def.Tiers.FullRest.EveryNthFull))
+			fullRestIntNE.SetValue(float64(def.Tiers.FullRest.IntervalMin))
 			fullRestDurNE.SetValue(float64(def.Tiers.FullRest.DurationSec))
 			if i := indexOf(images, def.Tiers.FullRest.Image); i >= 0 {
 				fullRestImgCB.SetCurrentIndex(i)
@@ -122,15 +126,18 @@ func (a *App) openSettings() {
 			if i := logLevelCB.CurrentIndex(); i >= 0 && i < len(logLevels) {
 				newCfg.LogLevel = logLevels[i]
 			}
+			newCfg.Tiers.Micro.Enabled = microEnabledCB.Checked()
 			newCfg.Tiers.Micro.IntervalMin = int(microIntNE.Value())
 			newCfg.Tiers.Micro.DurationSec = int(microDurNE.Value())
 			if i := microImgCB.CurrentIndex(); i >= 0 && i < len(images) {
 				newCfg.Tiers.Micro.Image = images[i]
 			}
 			newCfg.Tiers.Micro.Instructions = microInstrLE.Text()
+			newCfg.Tiers.Full.Enabled = fullEnabledCB.Checked()
 			newCfg.Tiers.Full.IntervalMin = int(fullIntNE.Value())
 			newCfg.Tiers.Full.DurationSec = int(fullDurNE.Value())
-			newCfg.Tiers.FullRest.EveryNthFull = int(fullRestEveryNE.Value())
+			newCfg.Tiers.FullRest.Enabled = fullRestEnabledCB.Checked()
+			newCfg.Tiers.FullRest.IntervalMin = int(fullRestIntNE.Value())
 			newCfg.Tiers.FullRest.DurationSec = int(fullRestDurNE.Value())
 			if i := fullRestImgCB.CurrentIndex(); i >= 0 && i < len(images) {
 				newCfg.Tiers.FullRest.Image = images[i]
@@ -185,6 +192,21 @@ func (a *App) openSettings() {
 		MinSize:  d.Size{Width: 520, Height: 560},
 		Layout:   d.VBox{},
 		Children: []d.Widget{
+			// Enabled toggles for each break tier, sitting above the tabs so
+			// they're visible regardless of which tab is open. Per-tier
+			// settings stay editable even when Enabled is off — the checkbox
+			// is purely a runtime gate (counter freezes, no popups), not a
+			// UI gate.
+			d.GroupBox{
+				Title:  "Enabled breaks",
+				Layout: d.HBox{},
+				Children: []d.Widget{
+					d.CheckBox{AssignTo: &microEnabledCB, Text: "Micro break", Checked: work.Tiers.Micro.Enabled},
+					d.CheckBox{AssignTo: &fullEnabledCB, Text: "Full break", Checked: work.Tiers.Full.Enabled},
+					d.CheckBox{AssignTo: &fullRestEnabledCB, Text: "Full rest", Checked: work.Tiers.FullRest.Enabled},
+					d.HSpacer{},
+				},
+			},
 			d.TabWidget{
 				Pages: []d.TabPage{
 					{
@@ -260,8 +282,8 @@ func (a *App) openSettings() {
 						Title:  "Full rest",
 						Layout: d.Grid{Columns: 2},
 						Children: []d.Widget{
-							d.Label{Text: "Replace every Nth full break:"},
-							d.NumberEdit{AssignTo: &fullRestEveryNE, MinValue: 1, MaxValue: 20, Value: float64(work.Tiers.FullRest.EveryNthFull)},
+							d.Label{Text: "Interval (minutes):"},
+							d.NumberEdit{AssignTo: &fullRestIntNE, MinValue: 1, MaxValue: 480, Value: float64(work.Tiers.FullRest.IntervalMin)},
 							d.Label{Text: "Duration (seconds):"},
 							d.NumberEdit{AssignTo: &fullRestDurNE, MinValue: 30, MaxValue: 3600, Value: float64(work.Tiers.FullRest.DurationSec)},
 							d.Label{Text: "Image:"},
@@ -346,11 +368,10 @@ func validate(c *config.Config) error {
 	if c.Popup.SnoozeMinutes < 1 {
 		return fmt.Errorf("snooze must be at least 1 minute")
 	}
-	if c.Tiers.Micro.IntervalMin < 1 || c.Tiers.Full.IntervalMin < 1 {
+	if c.Tiers.Micro.IntervalMin < 1 ||
+		c.Tiers.Full.IntervalMin < 1 ||
+		c.Tiers.FullRest.IntervalMin < 1 {
 		return fmt.Errorf("intervals must be at least 1 minute")
-	}
-	if c.Tiers.FullRest.EveryNthFull < 1 {
-		return fmt.Errorf("everyNthFull must be at least 1")
 	}
 	return nil
 }
