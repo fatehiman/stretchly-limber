@@ -14,7 +14,7 @@ A tiny, portable system-tray app that nudges you to stretch — adaptively, base
 
 1. **Three break tiers, not user-picked exercises.** The schedule follows orthopedic guidance; the user does not pick exercises. Limber rotates through anatomically-targeted stretches automatically.
 2. **Active-time accounting.** Counters tick only while you're actually typing/clicking. Step away → they pause.
-3. **Idle = next break.** If you go idle ≥ 5 min, Limber assumes you've stepped away (presumably moving), and the *next-due* break popup appears so you see the recommended stretch when you return. The popup waits — no auto-close — until your first mouse/keyboard event.
+3. **Idle = next break.** If you go idle ≥ 5 min, Limber assumes you've stepped away (presumably moving), and the *next-due* break popup appears so you see the recommended stretch when you return. The popup waits — no auto-close — until your first mouse/keyboard event. If a regular popup happened to be on screen when you went idle and its countdown ran out while you were away, the idle popup still appears so you don't return to an empty desktop.
 4. **Frictionless dismissal.** No buttons. The whole left or right strip of the popup is a hover zone — push the cursor toward it and it triggers.
 5. **Pause for screen recordings.** A toggleable Pause menu freezes everything; never persists across restarts.
 
@@ -33,23 +33,24 @@ A tiny, portable system-tray app that nudges you to stretch — adaptively, base
 
 ## The break model
 
-Three independent counters run in parallel, all paused outside working hours, while idle, or while Pause is on:
+Three counters run in parallel, all paused outside working hours, while idle, while Pause is on, or while any tier is in a pending snooze (a snooze delays *all* future break events, not just the snoozed tier — see [Hover-trigger strips](#hover-trigger-strips-no-buttons-no-clicks)):
 
 | Tier          | Default interval                        | Default duration | Auto-close on countdown 0?           | Content                                                 |
 | ------------- | --------------------------------------- | ---------------- | ------------------------------------ | ------------------------------------------------------- |
 | **Micro**     | every **20 min** active                 | **20 sec**       | yes                                  | 20-20-20 eye break                                      |
 | **Full**      | every **30 min** active                 | **60 sec**       | yes                                  | rotates: neck → shoulders → wrists → lumbar → hip flexor |
-| **Full-rest** | replaces every **3rd** full (≈ 90 min)  | **15 min**       | yes                                  | stand, walk, longer stretches                           |
+| **Full-rest** | every **90 min** active                 | **15 min**       | yes                                  | stand, walk, longer stretches                           |
 
-Rotation uses a runtime-only round-robin index per tier (lost on restart, which is fine — orthopedically the order doesn't matter).
+Each tier can be independently enabled or disabled in Settings. Disabled tiers are skipped — their counter is frozen and they never fire popups. Rotation uses a runtime-only round-robin index per tier (lost on restart, which is fine — orthopedically the order doesn't matter).
 
 ### Idle handling (the critical rule)
 
 - `idle ≥ idleResetSeconds` (default **300 s** = 5 min) → all counters **pause**.
-- The moment idle crosses that threshold, Limber pops up the **next-nearest-due** break (the tier whose counter was closest to firing). This popup:
+- The moment idle crosses that threshold, Limber pops up the **next-nearest-due** break (the enabled tier whose counter was closest to firing). This popup:
   - has the same image + instructions + countdown as a normal popup,
   - does **not** auto-close when the countdown reaches 0,
   - **closes the instant** any mouse movement or keyboard activity is detected (the user has returned).
+- If a regular popup is already on screen at the moment idle starts, the idle popup is deferred. If that regular popup auto-completes while you're still idle, the idle popup is then fired so you always have something to dismiss on return.
 - On return, the shown tier's counter resets to 0 (treated as completed). Other tiers' counters resume from their paused values.
 
 ### Reset menu vs. idle
@@ -65,7 +66,7 @@ If now is not in `[workingHours.start, workingHours.end]`, all counters are held
 
 Right-click only:
 
-- **Pause** *(checkmark, off at startup, never saved)* — when on, all counters are frozen; popups suppressed; tray icon dims. Toggling off resumes from the same counter values.
+- **Pause** *(checkmark, off at startup, never saved)* — when on, all counters are frozen; popups suppressed; tray icon dims. Toggling off resumes from the same counter values. Any popup that was on screen (and any queued behind it) is preserved and re-fired on unpause, so a screen-recording pause doesn't make you lose a stretch reminder.
 - *— separator —*
 - **Reset** — full reset of all counters (same as relaunching).
 - **Test** — fast-forwards the next-due tier so its popup appears immediately. Use this when you stand up to stretch on your own and want to see/dismiss the popup before the timer reaches it.
@@ -79,8 +80,8 @@ Right-click only:
 
 - Borderless, fixed-size, **never takes focus**, no taskbar entry.
 - Dark background (`#1e1e1e`), white text.
-- Default size: **240 × 260** (you can shrink to 200 × 100 in config; the larger default is to fit image + text + countdown comfortably).
-- Positioned in the configured screen corner with a 24 px margin.
+- Default size: **200 × 100** (compact, designed to sit unobtrusively in a screen corner). Increase `popup.width` / `popup.height` in Settings if you want room for a larger image; the popup auto-scales the layout to the configured pixel size.
+- Positioned in the configured screen corner with `horizontalPaddingPx` / `verticalPaddingPx` margins (both default to 0 — the popup sits flush with the screen edge).
 - Only **one** popup at a time. If a second tier comes due while one is showing, it queues and fires after the current one closes.
 
 ### Layout, top to bottom
@@ -92,10 +93,12 @@ Right-click only:
 
 ### Hover-trigger strips (no buttons, no clicks)
 
-The strips run the **full height** of the window, `edgeTriggerPx` wide (default 10).
+The strips run the **full height** of the window, `edgeTriggerPx` wide (default 30).
 
 - **Close strip** — light-red background (`#f4a8a8`), label `C L O S E` written vertically in white. Action: dismiss popup, reset that tier's counter (treated as completed).
-- **Snooze strip** — light-yellow background (`#f5e6a3`), label `S N O O Z E` written vertically in dark gray. Action: dismiss popup; the same tier re-fires after `snoozeMinutes` (default 3, configurable, **unlimited** repeats). The snooze counter increments; the next popup will display `Nth snooze` below the image.
+- **Snooze strip** — light-yellow background (`#f5e6a3`), label `S N O O Z E` written vertically in dark gray. Action: dismiss popup; the same tier re-fires after `snoozeMinutes` (default 3, configurable, **unlimited** repeats). The snooze counter increments; the next popup will display `Nth snooze` below the image. **While any tier is in pending snooze, every other tier's counter freezes too** — snoozing one break delays all future events by the snooze interval, rather than only postponing the snoozed tier.
+
+For idle popups, the strip dwell is bypassed: any real mouse move (after Windows' initial seed event) closes the popup as a completion — matching the "closes the instant any activity is detected" contract and removing the race where a cursor entering the snooze strip on return could accidentally snooze the popup.
 
 #### Strip placement is mirrored across the screen
 
@@ -112,7 +115,7 @@ Rationale: pushing the cursor "toward the corner" commits (close); flicking it "
 
 #### Dwell guard
 
-`edgeDwellMs` (default **50 ms**, configurable) is the time the cursor must remain in the strip before triggering. Prevents accidental fires when the cursor merely passes through.
+`edgeDwellMs` (default **0 ms**, configurable) is the time the cursor must remain in the strip before triggering. Set above zero to prevent accidental fires when the cursor merely passes through; at the default 0 the strip fires the moment the cursor crosses into it (with the seed-event guard preventing auto-fire if the popup opens under the cursor).
 
 ### Countdown end behaviour
 
@@ -137,28 +140,33 @@ All values are stored in `config.json` next to the binary. The settings window m
   },
   "idleResetSeconds": 300,
   "popup": {
-    "corner":         "bottom-left", // top-left | top-right | bottom-left | bottom-right
-    "width":          240,
-    "height":         260,
-    "edgeTriggerPx":  10,
-    "edgeDwellMs":    50,
-    "snoozeMinutes":  3
+    "corner":              "bottom-left", // top-left | top-right | bottom-left | bottom-right
+    "width":               200,
+    "height":              100,
+    "horizontalPaddingPx": 0,
+    "verticalPaddingPx":   0,
+    "edgeTriggerPx":       30,
+    "edgeDwellMs":         0,
+    "snoozeMinutes":       3
   },
   "audio": {
     "enabled": false
   },
   "startAtBoot": false,
+  "logLevel":    "info", // info | debug | error | off
 
   "tiers": {
     "micro": {
-      "intervalMin":          20,
-      "durationSec":          20,
-      "image":                "eye_2020.jpg",
-      "instructions":         "Look at something at least 20 feet (6 m) away for 20 seconds."
+      "enabled":             true,
+      "intervalMin":         20,
+      "durationSec":         20,
+      "image":               "eye_2020.jpg",
+      "instructions":        "Look at something at least 20 feet (6 m) away for 20 seconds."
     },
     "full": {
-      "intervalMin":          30,
-      "durationSec":          60,
+      "enabled":             true,
+      "intervalMin":         30,
+      "durationSec":         60,
       "rotation": [
         { "id": "chin-tuck",        "image": "cervical_retraction.jpg",  "instructions": "Sit tall. Pull your chin straight back (double-chin). Hold 5 s. Repeat 10×." },
         { "id": "shoulder-rolls",   "image": "scapular_retraction.jpg",  "instructions": "Roll shoulders back 10×. Then squeeze shoulder blades together, hold 5 s, repeat 10×." },
@@ -168,23 +176,26 @@ All values are stored in `config.json` next to the binary. The settings window m
       ]
     },
     "fullRest": {
-      "everyNthFull":         3,
-      "durationSec":          900,
-      "image":                "walk_break.jpg",
-      "instructions":         "Stand up, walk for several minutes, look around the room, do a full-body stretch."
+      "enabled":             true,
+      "intervalMin":         90,
+      "durationSec":         900,
+      "image":               "walk_break.jpg",
+      "instructions":        "Stand up, walk for several minutes, look around the room, do a full-body stretch."
     }
   }
 }
 ```
 
+Full-rest is an independent counter on its own `intervalMin`, not a substitution for every Nth Full break — disabling Full does not affect when Full-rest fires.
+
 ### Settings UI
 
 The settings window has tabs: **General**, **Popup**, **Micro**, **Full**, **Full-rest**, **Audio**.
 
-- **General** — working hours, idle-reset seconds, start-at-boot.
-- **Popup** — corner, width, height, edge-trigger px, edge-dwell ms, snooze minutes.
-- **Micro / Full / Full-rest** — interval (and `everyNthFull` for full-rest), duration, instructions, **image listbox** populated from any `.jpg` in `assets/exercises/`.
-- **Full** also lets you reorder / enable / disable individual rotation entries.
+- **General** — working hours, idle-reset seconds, start-at-boot, log level.
+- **Popup** — corner, width, height, horizontal/vertical padding, edge-trigger px, edge-dwell ms, snooze minutes.
+- **Micro / Full / Full-rest** — enable toggle, interval, duration, instructions, **image listbox** populated from any `.jpg` in `assets/exercises/`.
+- **Full** also lets you reorder / enable / disable individual rotation entries (read-only in v1 — edit `config.json` directly).
 - **Audio** — enable + (later) volume.
 
 Buttons (always at the bottom): **Default**, **Save**, **Cancel**.
@@ -200,21 +211,39 @@ A 1-second ticker queries system-wide idle time:
 - **Windows:** `GetLastInputInfo` (returns ticks since last input across all processes — no hooks, no privileges).
 - **Linux/X11:** `XScreenSaverQueryInfo` from `libXss`.
 
-Per-tier loop, every second:
+Per-tier loop, every second (simplified):
 
 ```
-if pause || outsideWorkingHours:
-    counters held at 0; rotations held; no popups
-elif idle >= idleResetSeconds:
-    if not already showing idle popup:
-        fire next-nearest-due tier as IDLE popup
-    counters paused
+update daily total active-time counter
+
+if outsideWorkingHours:
+    close non-Test popup; full reset of counters / rotations / snooze
+    return
+
+if pause:
+    counters frozen; current popup (if any) was closed when pause engaged
+    and pushed onto the front of the queue for re-fire on unpause
+    return
+
+if idle >= idleResetSeconds:
+    counters frozen
+    if no popup is showing AND no idle popup has fired this idle session
+       AND at least one tier is enabled:
+        fire next-nearest-due ENABLED tier as IDLE popup
+    return
+
+# Active state.
+on activity-after-idle:
+    close any IDLE popup; reset that tier's counter; advance rotation
+
+if any tier is in pending snooze:
+    all break counters frozen (snooze delays every future event)
 else:
-    on activity-after-idle:
-        close any IDLE popup; reset that tier's counter; advance rotation
-    counters += 1 sec
-    for each tier where counter >= intervalMin*60:
-        queue popup (or fire immediately if none showing)
+    for each enabled tier: counter += 1 sec
+
+drain pending-snooze timers; when one expires, re-fire that tier
+for each enabled tier where counter >= intervalMin*60 and not already fired:
+    queue popup (or fire immediately if none showing)
 ```
 
 ## Project layout
@@ -339,6 +368,6 @@ Untick *Start at boot* in **Settings** (so the autorun entry is removed), then d
 
 ## Known caveats
 
-- **Test outside working hours**: triggering Test before the working window opens will fire a popup, but the next 1 s tick will close it (because the working-hours gate forces a full reset). Use Test during working hours.
+- **Test outside working hours**: Test-triggered popups are flagged so the working-hours gate won't auto-close them — you can preview a break popup at any time without the next tick killing it.
 - **Concurrent settings edits**: changing settings while a popup is on screen is harmless but the in-flight popup uses the values it captured at open time.
-- **High-DPI**: popup geometry in `config.json` is in physical pixels. On 200% scaled displays a 240 × 260 popup will look small; bump the values in **Settings**.
+- **High-DPI**: popup geometry in `config.json` is in physical pixels. On 200 % scaled displays the default 200 × 100 will look small; bump the values in **Settings**.

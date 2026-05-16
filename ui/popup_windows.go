@@ -355,6 +355,16 @@ func (p *popupWindow) onMouseMove(x, y int, button walk.MouseButton) {
 		p.a.Log.Debug("popup first mouse-move seeded", "actualStrip", newStrip, "seededAs", 0, "x", x)
 		return
 	}
+	// Idle popup: the README contract is "closes the instant any mouse
+	// movement or keyboard activity is detected". Treat the first real mouse
+	// move (post-seed) as the user returning — complete immediately, bypass
+	// strip dwell. Prevents a race where the cursor lands in the snooze strip
+	// and accidentally snoozes a popup that should just be closing.
+	if p.evt.Idle {
+		p.a.Log.Debug("idle popup: closing on user activity (post-seed mouse move)")
+		p.finish(scheduler.ResCompleted)
+		return
+	}
 	if newStrip == p.currentStrip {
 		return
 	}

@@ -95,6 +95,7 @@ type Scheduler struct {
 
 	paused      bool
 	inIdle      bool
+	idleFired   bool // an idle popup has already been shown during the current idle session
 	popupActive bool
 	popupTier   Tier
 	popupIsIdle bool
@@ -250,14 +251,25 @@ func (s *Scheduler) handleCommand(c command) bool {
 	case cmdPauseOn:
 		s.log.Info("pause on")
 		s.paused = true
-		s.events <- Event{Type: EvtClose}
-		s.popupActive = false
-		s.popupIsIdle = false
-		s.popupIsTest = false
-		s.queue = nil
+		if s.popupActive {
+			s.events <- Event{Type: EvtClose}
+			// Push the suppressed popup back onto the front of the queue so
+			// unpause re-fires it. Exceptions: Test popups are user-initiated
+			// one-shots, and idle popups belong to a since-passed idle session
+			// — neither should resurrect on unpause.
+			if !s.popupIsTest && !s.popupIsIdle {
+				s.queue = append([]queued{{tier: s.popupTier, idle: false}}, s.queue...)
+			}
+			s.popupActive = false
+			s.popupIsIdle = false
+			s.popupIsTest = false
+		}
 	case cmdPauseOff:
 		s.log.Info("pause off")
 		s.paused = false
+		// Re-fire any popup that was on screen (or queued) when pause was
+		// engaged. dequeue is a no-op on an empty queue.
+		s.dequeue()
 	case cmdShutdown:
 		s.log.Info("scheduler shutdown")
 		s.events <- Event{Type: EvtClose}
@@ -358,23 +370,12 @@ func (s *Scheduler) tick() {
 	if isIdle && !s.inIdle {
 		s.inIdle = true
 		s.log.Info("idle entered", "idleSec", idle, "threshold", threshold)
-		// Fire idle popup if no popup is showing AND at least one tier is
-		// enabled (otherwise there's no break to remind about).
-		if !s.popupActive && s.anyTierEnabled() {
-			tier := s.nextNearestKind()
-			s.popupActive = true
-			s.popupIsIdle = true
-			s.popupTier = tier
-			s.log.Info("idle popup firing", "tier", tier.String())
-			s.events <- s.makeShowEvent(tier, true)
-		}
-		s.updateStatus(working, idle)
-		return
 	}
 
 	// Idle return.
 	if !isIdle && s.inIdle {
 		s.inIdle = false
+		s.idleFired = false
 		s.log.Info("idle exited", "popupWasIdle", s.popupIsIdle)
 		if s.popupIsIdle {
 			s.events <- Event{Type: EvtClose}
@@ -386,8 +387,22 @@ func (s *Scheduler) tick() {
 		// Fall through to tick counters.
 	}
 
-	// Still idle but popup already shown — counters frozen.
+	// While idle: counters frozen. Fire the idle popup if no popup is showing
+	// and we haven't already shown one this idle session. This re-fires the
+	// idle popup if a regular popup was on screen at idle entry and has since
+	// auto-closed during idle — without this, the user would return to an
+	// empty desktop, missing the README's "see the recommended stretch when
+	// you return" contract.
 	if isIdle {
+		if !s.popupActive && !s.idleFired && s.anyTierEnabled() {
+			tier := s.nextNearestKind()
+			s.popupActive = true
+			s.popupIsIdle = true
+			s.popupTier = tier
+			s.idleFired = true
+			s.log.Info("idle popup firing", "tier", tier.String())
+			s.events <- s.makeShowEvent(tier, true)
+		}
 		s.updateStatus(working, idle)
 		return
 	}
@@ -583,6 +598,7 @@ func (s *Scheduler) fullReset() {
 	s.popupIsTest = false
 	s.queue = nil
 	s.inIdle = false
+	s.idleFired = false
 }
 
 func (s *Scheduler) updateStatus(working bool, idle int) {
