@@ -88,16 +88,24 @@ Right-click only:
 
 - Borderless, fixed-size, **never takes focus**, no taskbar entry.
 - Dark background (`#1e1e1e`), white text.
-- Default size: **200 × 100** (compact, designed to sit unobtrusively in a screen corner). Increase `popup.width` / `popup.height` in Settings if you want room for a larger image; the popup auto-scales the layout to the configured pixel size.
+- **Image area is fixed at 200 × 140 px**; the popup auto-sizes around it (image rect + countdown band + two edge strips). With the default `edgeTriggerPx = 30` the resulting popup is **268 × 184 px**. `popup.width` / `popup.height` are no longer honoured — they remain in `config.json` for backwards compatibility but are ignored. Tune `edgeTriggerPx` if you need wider/narrower strips; the image rect stays 200 × 140.
 - Positioned in the configured screen corner with `horizontalPaddingPx` / `verticalPaddingPx` margins (both default to 0 — the popup sits flush with the screen edge).
 - Only **one** popup at a time. If a second tier comes due while one is showing, it queues and fires after the current one closes.
 
+### Image contract
+
+Every JPG under `assets/exercises/` **must be exactly 200 × 140 px**. The popup draws bitmaps at native size — no scaling, no aspect-ratio correction. Wrong-size sources behave deterministically:
+
+- Larger than 200 × 140 → cropped to the **top-left** 200 × 140 (bottom-right portion discarded).
+- Smaller than 200 × 140 → drawn at native size from the top-left of the rect; the remaining area shows the dark popup background (letterboxing).
+
+This is intentional: you decide what's in the frame, the app never warps your artwork.
+
 ### Layout, top to bottom
 
-1. Exercise image (centered)
-2. Instruction text (1–2 lines)
-3. **Snooze indicator** — only visible when `snoozeCount ≥ 1`, e.g. *"2nd snooze"* in a slightly warmer tint to nudge the user's awareness.
-4. Countdown `M:SS` (regular) or `M:SS — waiting for activity…` (idle-triggered).
+1. **Image rect** (200 × 140 px, fixed). For the idle probe and tier popups whose image file is missing, this area is used as a text fallback (title + instructions, centered).
+2. **Countdown band** (36 px tall) — `M:SS` (regular), `M:SS  •  return to close` (idle break), `M:SS  •  move mouse if present` (idle probe).
+3. **Snooze badge** — a small yellow disc with the snooze count inside, sitting on the right edge of the countdown band. Only painted when `snoozeCount ≥ 1`. No reserved row; if there's no snooze you'd never know it could be there.
 
 ### Hover-trigger strips (no buttons, no clicks)
 

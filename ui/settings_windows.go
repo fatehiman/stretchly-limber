@@ -37,7 +37,7 @@ func (a *App) openSettings() {
 		startAtBootCB                                                           *walk.CheckBox
 		logLevelCB                                                              *walk.ComboBox
 		cornerCB                                                                *walk.ComboBox
-		popupWNE, popupHNE, hpadNE, vpadNE, edgeTrigNE, edgeDwellNE, snoozeMinNE *walk.NumberEdit
+		hpadNE, vpadNE, edgeTrigNE, edgeDwellNE, snoozeMinNE *walk.NumberEdit
 		audioEnabledCB                                                          *walk.CheckBox
 		microEnabledCB, fullEnabledCB, fullRestEnabledCB                        *walk.CheckBox
 		microIntNE, microDurNE                                                  *walk.NumberEdit
@@ -74,8 +74,6 @@ func (a *App) openSettings() {
 			idleProbeNE.SetValue(float64(def.IdleProbeSeconds))
 			startAtBootCB.SetChecked(def.StartAtBoot)
 			cornerCB.SetCurrentIndex(indexOf(corners, def.Popup.Corner))
-			popupWNE.SetValue(float64(def.Popup.Width))
-			popupHNE.SetValue(float64(def.Popup.Height))
 			hpadNE.SetValue(float64(def.Popup.HorizontalPaddingPx))
 			vpadNE.SetValue(float64(def.Popup.VerticalPaddingPx))
 			edgeTrigNE.SetValue(float64(def.Popup.EdgeTriggerPx))
@@ -117,8 +115,6 @@ func (a *App) openSettings() {
 			if i := cornerCB.CurrentIndex(); i >= 0 && i < len(corners) {
 				newCfg.Popup.Corner = corners[i]
 			}
-			newCfg.Popup.Width = int(popupWNE.Value())
-			newCfg.Popup.Height = int(popupHNE.Value())
 			newCfg.Popup.HorizontalPaddingPx = int(hpadNE.Value())
 			newCfg.Popup.VerticalPaddingPx = int(vpadNE.Value())
 			newCfg.Popup.EdgeTriggerPx = int(edgeTrigNE.Value())
@@ -235,10 +231,6 @@ func (a *App) openSettings() {
 						Children: []d.Widget{
 							d.Label{Text: "Corner:"},
 							d.ComboBox{AssignTo: &cornerCB, Model: corners, CurrentIndex: cornerIdx},
-							d.Label{Text: "Width (px):"},
-							d.NumberEdit{AssignTo: &popupWNE, MinValue: 100, MaxValue: 800, Value: float64(work.Popup.Width)},
-							d.Label{Text: "Height (px):"},
-							d.NumberEdit{AssignTo: &popupHNE, MinValue: 60, MaxValue: 800, Value: float64(work.Popup.Height)},
 							d.Label{Text: "Horizontal padding (px):"},
 							d.NumberEdit{AssignTo: &hpadNE, MinValue: 0, MaxValue: 1000, Value: float64(work.Popup.HorizontalPaddingPx)},
 							d.Label{Text: "Vertical padding (px):"},
@@ -249,6 +241,8 @@ func (a *App) openSettings() {
 							d.NumberEdit{AssignTo: &edgeDwellNE, MinValue: 0, MaxValue: 2000, Value: float64(work.Popup.EdgeDwellMs)},
 							d.Label{Text: "Snooze (minutes):"},
 							d.NumberEdit{AssignTo: &snoozeMinNE, MinValue: 1, MaxValue: 60, Value: float64(work.Popup.SnoozeMinutes)},
+							d.Label{Text: ""},
+							d.Label{Text: "Image size is fixed at 200 × 140 px.\nPopup auto-sizes to fit; width follows edge-trigger."},
 						},
 					},
 					{
@@ -365,9 +359,6 @@ func validate(c *config.Config) error {
 	}
 	if c.IdleProbeSeconds < 5 {
 		return fmt.Errorf("idle probe must be at least 5 seconds")
-	}
-	if c.Popup.Width < 160 || c.Popup.Height < 100 {
-		return fmt.Errorf("popup too small (min 160x100)")
 	}
 	if c.Popup.EdgeTriggerPx < 4 {
 		return fmt.Errorf("edge trigger must be at least 4 px")

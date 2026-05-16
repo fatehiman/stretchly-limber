@@ -4,6 +4,7 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"image/jpeg"
 	"os"
 	"sync/atomic"
@@ -15,6 +16,17 @@ import (
 
 	"limber/audio"
 	"limber/scheduler"
+)
+
+// Strict pixel contract for popup geometry. The image area is fixed: any JPG
+// dropped into assets/exercises/ MUST be exactly imageW × imageH px. Larger
+// sources are cropped to the top-left of this rect; smaller ones are drawn at
+// native size with the remainder showing the popup's dark background.
+const (
+	imageW       = 200
+	imageH       = 140
+	countdownH   = 36
+	popupPaddingPx = 4
 )
 
 
@@ -136,10 +148,19 @@ func newPopup(a *App, e scheduler.Event) (*popupWindow, error) {
 		return nil, err
 	}
 
-	// CustomWidget filling the window. Pin its min/max size to the configured
-	// popup pixels — otherwise the layout would shrink it to size-hint zero,
-	// which caused the "only C visible" bug in the previous attempt.
-	w, h := cfg.Popup.Width, cfg.Popup.Height
+	// Popup dimensions are derived from the fixed image rect plus two edge
+	// strips plus the countdown band. cfg.Popup.Width / Height are ignored —
+	// the strict-size image contract drives geometry now, so users don't have
+	// to tune popup pixels to fit their images. edgeTriggerPx still influences
+	// total width (strips are configurable; image stays 200 × 140).
+	edge := cfg.Popup.EdgeTriggerPx
+	if edge < 4 {
+		edge = 4
+	}
+	w := imageW + 2*edge + 2*popupPaddingPx
+	h := popupPaddingPx + imageH + countdownH + popupPaddingPx
+	// CustomWidget filling the window. Pin its min/max size so the layout
+	// pass doesn't shrink it.
 	cw, err := walk.NewCustomWidget(mw, 0, p.paint)
 	if err != nil {
 		p.releaseResources()
@@ -468,9 +489,11 @@ func (p *popupWindow) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 		return nil
 	}
 	edge := p.a.Cfg.Popup.EdgeTriggerPx
-	if edge < 1 {
-		edge = 1
+	if edge < 4 {
+		edge = 4
 	}
+	// Should never trigger given derived popup sizing, but stay defensive
+	// against a hand-edited config.
 	if edge*2 >= w {
 		edge = w / 5
 	}
@@ -481,76 +504,29 @@ func (p *popupWindow) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 		return err
 	}
 
-	innerLeft := edge
-	innerRight := w - edge
-	innerWidth := innerRight - innerLeft
-	if innerWidth < 1 {
-		innerWidth = 1
-	}
+	innerLeft := edge + popupPaddingPx
+	imgX := innerLeft
+	imgY := popupPaddingPx
+	countY := imgY + imageH
 
-	// Bottom band: countdown. Sized as a fraction of height so 100 px popups
-	// still get a readable countdown line.
-	countH := h / 4
-	if countH < 18 {
-		countH = 18
-	}
-	if countH > 36 {
-		countH = 36
-	}
-	countY := h - countH
-
-	// Above countdown: snooze marker (visible only after a snooze).
-	snoozeH := 0
-	if p.evt.SnoozeCount > 0 {
-		snoozeH = 12
-	}
-	snoozeY := countY - snoozeH
-
-	// Above snooze: instructions / title combined area. For tiny popups
-	// (< 130 px tall) we show only the title and skip wrapped instructions.
-	textTop := 4
-	instrTop := snoozeY
-	titleH := 14
-	titleY := instrTop - titleH - 2
-	if titleY < textTop+1 {
-		titleY = textTop + 1
-	}
-
-	// Image area: top of popup, above title.
-	imgY := textTop
-	imgH := titleY - imgY - 2
-	if imgH < 0 {
-		imgH = 0
-	}
-
-	// 1. Image (or fallback title if no image).
-	if imgH > 8 {
-		imgRect := walk.Rectangle{X: innerLeft + 4, Y: imgY, Width: innerWidth - 8, Height: imgH}
-		if p.bitmap != nil {
-			_ = canvas.DrawImageStretchedPixels(p.bitmap, imgRect)
-		} else {
-			_ = canvas.DrawTextPixels(p.evt.Title, p.titleFont, walk.RGB(0xee, 0xee, 0xee),
-				imgRect, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
-		}
-	}
-
-	// 2. Title (only if we have room AND we drew an image — otherwise the
-	//    fallback above already shows the title in the image area).
-	if titleY+titleH < snoozeY && p.bitmap != nil {
+	// 1. Image rect (200 × 140, fixed). Bitmap drawn at native size from
+	//    top-left of the rect — no stretching. Oversized sources were already
+	//    cropped to 200 × 140 at load time; undersized sources leave the
+	//    surrounding dark background visible.
+	if p.bitmap != nil {
+		_ = canvas.DrawImagePixels(p.bitmap, walk.Point{X: imgX, Y: imgY})
+	} else {
+		// Text fallback — only used when the tier image is missing OR for the
+		// idle probe popup which is intentionally tier-agnostic.
+		titleRect := walk.Rectangle{X: imgX, Y: imgY + 12, Width: imageW, Height: 24}
 		_ = canvas.DrawTextPixels(p.evt.Title, p.titleFont, walk.RGB(0xee, 0xee, 0xee),
-			walk.Rectangle{X: innerLeft, Y: titleY, Width: innerWidth, Height: titleH},
-			walk.TextCenter|walk.TextSingleLine)
+			titleRect, walk.TextCenter|walk.TextSingleLine)
+		instrRect := walk.Rectangle{X: imgX + 8, Y: imgY + 44, Width: imageW - 16, Height: imageH - 56}
+		_ = canvas.DrawTextPixels(p.evt.Instructions, p.textFont, walk.RGB(0xcc, 0xcc, 0xcc),
+			instrRect, walk.TextCenter|walk.TextWordbreak)
 	}
 
-	// 3. Snooze marker.
-	if snoozeH > 0 {
-		_ = canvas.DrawTextPixels(snoozeMarker(p.evt.SnoozeCount),
-			p.textFont, walk.RGB(0xff, 0xc6, 0x6e),
-			walk.Rectangle{X: innerLeft, Y: snoozeY, Width: innerWidth, Height: snoozeH},
-			walk.TextCenter|walk.TextSingleLine)
-	}
-
-	// 4. Countdown.
+	// 2. Countdown band.
 	countTxt := formatDuration(p.remaining)
 	switch {
 	case p.evt.IsProbe:
@@ -559,13 +535,28 @@ func (p *popupWindow) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 		countTxt = countTxt + "  •  return to close"
 	}
 	_ = canvas.DrawTextPixels(countTxt, p.countFont, walk.RGB(0xff, 0xff, 0xff),
-		walk.Rectangle{X: innerLeft, Y: countY, Width: innerWidth, Height: countH},
+		walk.Rectangle{X: imgX, Y: countY, Width: imageW, Height: countdownH},
 		walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
 
-	// 5. Edge strips. Probe popups have NO snooze option — both strips are
-	// rendered as CLOSE in red. In practice they're unreachable on a probe
-	// because any real mouse move cancels the probe first, but painting them
-	// consistently signals "no snooze here, just close".
+	// 3. Snooze badge — yellow disc with the snooze count, right-aligned in
+	//    the countdown band. Only painted when SnoozeCount ≥ 1. No reserved
+	//    row; sits inside the countdown band so it never displaces other
+	//    layout pieces.
+	if p.evt.SnoozeCount > 0 {
+		circleD := 22
+		circleX := imgX + imageW - circleD - 2
+		circleY := countY + (countdownH-circleD)/2
+		circleRect := walk.Rectangle{X: circleX, Y: circleY, Width: circleD, Height: circleD}
+		_ = canvas.FillEllipsePixels(p.snoozeBrush, circleRect)
+		_ = canvas.DrawTextPixels(fmt.Sprintf("%d", p.evt.SnoozeCount),
+			p.titleFont, walk.RGB(0x33, 0x33, 0x33),
+			circleRect, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+	}
+
+	// 4. Edge strips. Probe popups have NO snooze option — both strips are
+	//    rendered as CLOSE in red. In practice they're unreachable on a probe
+	//    because any real mouse move cancels it first, but painting them
+	//    consistently signals "no snooze here, just close".
 	leftRect := walk.Rectangle{X: 0, Y: 0, Width: edge, Height: h}
 	rightRect := walk.Rectangle{X: w - edge, Y: 0, Width: edge, Height: h}
 	if p.evt.IsProbe {
@@ -611,19 +602,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-func snoozeMarker(n int) string {
-	suffix := "th"
-	switch {
-	case n%10 == 1 && n%100 != 11:
-		suffix = "st"
-	case n%10 == 2 && n%100 != 12:
-		suffix = "nd"
-	case n%10 == 3 && n%100 != 13:
-		suffix = "rd"
-	}
-	return fmt.Sprintf("%d%s snooze", n, suffix)
-}
-
 // SPI_GETWORKAREA is not exported by lxn/win; declare the Win32 constant
 // locally. Value from user32.h.
 const spiGetWorkArea = 0x0030
@@ -666,6 +644,26 @@ func loadJPEGBitmap(path string) (*walk.Bitmap, error) {
 	img, err := jpeg.Decode(f)
 	if err != nil {
 		return nil, err
+	}
+	// Crop to the top-left imageW × imageH if the source is larger — keeps the
+	// strict-size contract: oversized images lose their bottom-right portion
+	// rather than being rescaled. Smaller sources stay as-is and are drawn at
+	// native size (the remainder of the rect shows the dark background).
+	b := img.Bounds()
+	if b.Dx() > imageW || b.Dy() > imageH {
+		cropW := imageW
+		if cropW > b.Dx() {
+			cropW = b.Dx()
+		}
+		cropH := imageH
+		if cropH > b.Dy() {
+			cropH = b.Dy()
+		}
+		if sub, ok := img.(interface {
+			SubImage(image.Rectangle) image.Image
+		}); ok {
+			img = sub.SubImage(image.Rect(b.Min.X, b.Min.Y, b.Min.X+cropW, b.Min.Y+cropH))
+		}
 	}
 	return walk.NewBitmapFromImageForDPI(img, 96)
 }
