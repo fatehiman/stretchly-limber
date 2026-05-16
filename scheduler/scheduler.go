@@ -51,6 +51,7 @@ type Event struct {
 	// Show-only fields below.
 	Tier         Tier
 	Idle         bool   // true if this popup is being shown because the user went idle
+	IsProbe      bool   // true if this popup is an idle probe (precedes the idle break popup)
 	Title        string // display title (e.g. "Eye Break")
 	ImagePath    string // absolute path to image file, may be "" if missing
 	Instructions string
@@ -62,8 +63,10 @@ type Event struct {
 type ResultAction int
 
 const (
-	ResCompleted ResultAction = iota // close strip, or countdown reached 0 (regular popup)
-	ResSnoozed                       // snooze strip
+	ResCompleted          ResultAction = iota // close strip, or countdown reached 0 (regular popup)
+	ResSnoozed                                // snooze strip
+	ResIdleProbeCancelled                     // probe popup dismissed by user activity — not really idle
+	ResIdleProbeExpired                       // probe countdown reached 0 — real idle confirmed
 )
 
 // Result is sent from the UI back to the scheduler when a popup closes due
@@ -93,14 +96,15 @@ type Scheduler struct {
 	snoozeCount map[Tier]int
 	pendSnooze  map[Tier]int
 
-	paused      bool
-	inIdle      bool
-	idleFired   bool // an idle popup has already been shown during the current idle session
-	popupActive bool
-	popupTier   Tier
-	popupIsIdle bool
-	popupIsTest bool // current popup was triggered by Test menu — survives the working-hours gate
-	queue       []queued
+	paused       bool
+	inIdle       bool
+	idleFired    bool // an idle popup (probe or break) has already been shown during the current idle session
+	popupActive  bool
+	popupTier    Tier
+	popupIsIdle  bool
+	popupIsProbe bool // current popup is the idle probe, not the break popup
+	popupIsTest  bool // current popup was triggered by Test menu — survives the working-hours gate
+	queue        []queued
 
 	// daily total of active (non-idle) seconds; resets on local-day rollover.
 	totalWorkingSec int
@@ -235,6 +239,7 @@ func (s *Scheduler) handleCommand(c command) bool {
 			s.events <- Event{Type: EvtClose}
 			s.popupActive = false
 			s.popupIsIdle = false
+			s.popupIsProbe = false
 			s.popupIsTest = false
 			s.queue = nil
 		}
@@ -245,6 +250,7 @@ func (s *Scheduler) handleCommand(c command) bool {
 		// auto-close it just because we're outside 9–18.
 		s.popupActive = true
 		s.popupIsIdle = false
+		s.popupIsProbe = false
 		s.popupIsTest = true
 		s.popupTier = tier
 		s.events <- s.makeShowEvent(tier, false)
@@ -255,13 +261,14 @@ func (s *Scheduler) handleCommand(c command) bool {
 			s.events <- Event{Type: EvtClose}
 			// Push the suppressed popup back onto the front of the queue so
 			// unpause re-fires it. Exceptions: Test popups are user-initiated
-			// one-shots, and idle popups belong to a since-passed idle session
-			// — neither should resurrect on unpause.
-			if !s.popupIsTest && !s.popupIsIdle {
+			// one-shots; idle break popups and probes belong to a since-passed
+			// idle session — none should resurrect on unpause.
+			if !s.popupIsTest && !s.popupIsIdle && !s.popupIsProbe {
 				s.queue = append([]queued{{tier: s.popupTier, idle: false}}, s.queue...)
 			}
 			s.popupActive = false
 			s.popupIsIdle = false
+			s.popupIsProbe = false
 			s.popupIsTest = false
 		}
 	case cmdPauseOff:
@@ -286,13 +293,39 @@ func (s *Scheduler) handleResult(r Result) {
 	switch r.Action {
 	case ResCompleted:
 		s.completeTier(tier)
+		s.popupActive = false
+		s.popupIsIdle = false
+		s.popupIsProbe = false
+		s.popupIsTest = false
+		s.dequeue()
 	case ResSnoozed:
 		s.snoozeTier(tier)
+		s.popupActive = false
+		s.popupIsIdle = false
+		s.popupIsProbe = false
+		s.popupIsTest = false
+		s.dequeue()
+	case ResIdleProbeCancelled:
+		// User moved during probe — they're at the keyboard after all. Clear
+		// popup state but leave idleFired alone: the next tick will see idle
+		// drop below threshold and run the idle-exit branch (which resets
+		// inIdle / idleFired). Counters resume from their pre-idle values
+		// because we never advanced past idle confirmation.
+		s.log.Info("idle probe cancelled — user is active, counters resume")
+		s.popupActive = false
+		s.popupIsProbe = false
+		s.popupIsIdle = false
+	case ResIdleProbeExpired:
+		// 30 s passed with no activity — real idle. Transition from probe to
+		// the actual idle break popup, reusing the tier we picked at probe
+		// fire. The probe popup already disposed itself; we just need to
+		// emit a Show event so the UI opens the break popup.
+		s.log.Info("idle probe expired — real idle confirmed, showing break popup", "tier", s.popupTier.String())
+		s.popupIsProbe = false
+		s.popupIsIdle = true
+		// popupActive stays true: we're still showing a popup, just a different one.
+		s.events <- s.makeShowEvent(s.popupTier, true)
 	}
-	s.popupActive = false
-	s.popupIsIdle = false
-	s.popupIsTest = false
-	s.dequeue()
 }
 
 func (s *Scheduler) completeTier(tier Tier) {
@@ -387,21 +420,24 @@ func (s *Scheduler) tick() {
 		// Fall through to tick counters.
 	}
 
-	// While idle: counters frozen. Fire the idle popup if no popup is showing
-	// and we haven't already shown one this idle session. This re-fires the
-	// idle popup if a regular popup was on screen at idle entry and has since
-	// auto-closed during idle — without this, the user would return to an
-	// empty desktop, missing the README's "see the recommended stretch when
-	// you return" contract.
+	// While idle: counters frozen. Fire the idle probe popup if no popup is
+	// showing and we haven't already shown one this idle session. The probe
+	// asks "are you really away?" for IdleProbeSeconds before we commit to
+	// the real idle break popup — so a user watching a movie at the keyboard
+	// (no input but still present) won't have a tier silently reset on them.
+	//
+	// This branch also re-fires the probe if a regular popup was on screen
+	// at idle entry and has since auto-closed during idle, so the user
+	// doesn't return to an empty desktop.
 	if isIdle {
 		if !s.popupActive && !s.idleFired && s.anyTierEnabled() {
 			tier := s.nextNearestKind()
 			s.popupActive = true
-			s.popupIsIdle = true
-			s.popupTier = tier
+			s.popupIsProbe = true
+			s.popupTier = tier // remembered for the break popup after probe expiry
 			s.idleFired = true
-			s.log.Info("idle popup firing", "tier", tier.String())
-			s.events <- s.makeShowEvent(tier, true)
+			s.log.Info("idle probe firing", "tier", tier.String(), "probeSec", s.cfg.IdleProbeSeconds)
+			s.events <- s.makeProbeEvent()
 		}
 		s.updateStatus(working, idle)
 		return
@@ -532,6 +568,27 @@ func (s *Scheduler) makeShowEvent(tier Tier, idle bool) Event {
 	}
 }
 
+// makeProbeEvent builds the "are you still there?" idle probe popup that
+// precedes the real idle break popup. Tier is recorded only so the scheduler
+// remembers which break to fire once the probe expires; the probe popup itself
+// is generic and tier-agnostic.
+func (s *Scheduler) makeProbeEvent() Event {
+	sec := s.cfg.IdleProbeSeconds
+	if sec <= 0 {
+		sec = 30
+	}
+	return Event{
+		Type:         EvtShow,
+		Tier:         s.popupTier,
+		Idle:         false,
+		IsProbe:      true,
+		Title:        "Are you still there?",
+		ImagePath:    "",
+		Instructions: "Move the mouse if you're at the keyboard. Otherwise a break reminder will appear.",
+		Duration:     time.Duration(sec) * time.Second,
+	}
+}
+
 func (s *Scheduler) tierContent(tier Tier) (title, imgPath, instr string, dur time.Duration) {
 	switch tier {
 	case TierMicro:
@@ -595,6 +652,7 @@ func (s *Scheduler) fullReset() {
 	s.pendSnooze = map[Tier]int{}
 	s.popupActive = false
 	s.popupIsIdle = false
+	s.popupIsProbe = false
 	s.popupIsTest = false
 	s.queue = nil
 	s.inIdle = false

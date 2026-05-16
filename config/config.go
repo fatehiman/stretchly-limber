@@ -70,6 +70,7 @@ type Tiers struct {
 type Config struct {
 	WorkingHours     WorkingHours `json:"workingHours"`
 	IdleResetSeconds int          `json:"idleResetSeconds"`
+	IdleProbeSeconds int          `json:"idleProbeSeconds"`
 	Popup            Popup        `json:"popup"`
 	Audio            Audio        `json:"audio"`
 	StartAtBoot      bool         `json:"startAtBoot"`
@@ -88,6 +89,7 @@ func Default() *Config {
 			End:   "18:00",
 		},
 		IdleResetSeconds: 300,
+		IdleProbeSeconds: 30,
 		Popup: Popup{
 			Corner:              "bottom-left",
 			Width:               200,
@@ -211,6 +213,7 @@ func (c *Config) Replace(n *Config) {
 	defer c.mu.Unlock()
 	c.WorkingHours = n.WorkingHours
 	c.IdleResetSeconds = n.IdleResetSeconds
+	c.IdleProbeSeconds = n.IdleProbeSeconds
 	c.Popup = n.Popup
 	c.Audio = n.Audio
 	c.StartAtBoot = n.StartAtBoot

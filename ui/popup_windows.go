@@ -59,7 +59,8 @@ func (a *App) openPopup(e scheduler.Event) {
 		"instructions", e.Instructions,
 		"durationSec", int(e.Duration.Seconds()),
 		"snoozeCount", e.SnoozeCount,
-		"idle", e.Idle)
+		"idle", e.Idle,
+		"probe", e.IsProbe)
 	if a.popup != nil {
 		// Defensive: reset before opening a new one.
 		a.Log.Debug("openPopup found existing popup, closing first")
@@ -275,11 +276,24 @@ func (p *popupWindow) tickLoop() {
 			}
 			p.remaining = next
 			p.invalidate()
-			if p.remaining == 0 && !p.evt.Idle {
-				// Regular popup: countdown end == completed.
-				p.a.Log.Info("popup countdown ended (auto-complete)", "tier", p.evt.Tier.String())
-				p.finish(scheduler.ResCompleted)
-				return
+			if p.remaining == 0 {
+				switch {
+				case p.evt.IsProbe:
+					// 30 s passed with no activity → real idle confirmed.
+					// Scheduler will close this popup and open the actual
+					// idle break popup.
+					p.a.Log.Info("idle probe countdown ended — real idle confirmed")
+					p.finish(scheduler.ResIdleProbeExpired)
+					return
+				case p.evt.Idle:
+					// Idle break popup: stays open until user returns. Do
+					// nothing on countdown 0.
+				default:
+					// Regular popup: countdown end == completed.
+					p.a.Log.Info("popup countdown ended (auto-complete)", "tier", p.evt.Tier.String())
+					p.finish(scheduler.ResCompleted)
+					return
+				}
 			}
 		}
 	}
@@ -355,7 +369,15 @@ func (p *popupWindow) onMouseMove(x, y int, button walk.MouseButton) {
 		p.a.Log.Debug("popup first mouse-move seeded", "actualStrip", newStrip, "seededAs", 0, "x", x)
 		return
 	}
-	// Idle popup: the README contract is "closes the instant any mouse
+	// Probe popup: any real mouse move (post-seed) means the user IS at the
+	// keyboard. Cancel the probe without completing any tier so counters
+	// resume from their pre-idle values.
+	if p.evt.IsProbe {
+		p.a.Log.Debug("idle probe: cancelled by user activity")
+		p.finish(scheduler.ResIdleProbeCancelled)
+		return
+	}
+	// Idle break popup: the README contract is "closes the instant any mouse
 	// movement or keyboard activity is detected". Treat the first real mouse
 	// move (post-seed) as the user returning — complete immediately, bypass
 	// strip dwell. Prevents a race where the cursor lands in the snooze strip
@@ -413,6 +435,14 @@ func (p *popupWindow) onMouseMove(x, y int, button walk.MouseButton) {
 }
 
 func (p *popupWindow) triggerSide(side int) {
+	// Probe popups have no snooze: both strips cancel the probe. Defensive —
+	// in practice onMouseMove already cancels probes on any post-seed move,
+	// well before strip dwell can fire.
+	if p.evt.IsProbe {
+		p.a.Log.Debug("idle probe strip triggered — cancelling probe")
+		p.finish(scheduler.ResIdleProbeCancelled)
+		return
+	}
 	leftIsClose := p.closeOnLeft
 	isClose := (side == 1 && leftIsClose) || (side == 2 && !leftIsClose)
 	sideName := "left"
@@ -522,17 +552,28 @@ func (p *popupWindow) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 
 	// 4. Countdown.
 	countTxt := formatDuration(p.remaining)
-	if p.evt.Idle {
+	switch {
+	case p.evt.IsProbe:
+		countTxt = countTxt + "  •  move mouse if present"
+	case p.evt.Idle:
 		countTxt = countTxt + "  •  return to close"
 	}
 	_ = canvas.DrawTextPixels(countTxt, p.countFont, walk.RGB(0xff, 0xff, 0xff),
 		walk.Rectangle{X: innerLeft, Y: countY, Width: innerWidth, Height: countH},
 		walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
 
-	// 5. Edge strips.
+	// 5. Edge strips. Probe popups have NO snooze option — both strips are
+	// rendered as CLOSE in red. In practice they're unreachable on a probe
+	// because any real mouse move cancels the probe first, but painting them
+	// consistently signals "no snooze here, just close".
 	leftRect := walk.Rectangle{X: 0, Y: 0, Width: edge, Height: h}
 	rightRect := walk.Rectangle{X: w - edge, Y: 0, Width: edge, Height: h}
-	if p.closeOnLeft {
+	if p.evt.IsProbe {
+		_ = canvas.FillRectanglePixels(p.closeBrush, leftRect)
+		_ = canvas.FillRectanglePixels(p.closeBrush, rightRect)
+		drawVerticalLetters(canvas, p.stripFont, walk.RGB(0xff, 0xff, 0xff), leftRect, "CLOSE")
+		drawVerticalLetters(canvas, p.stripFont, walk.RGB(0xff, 0xff, 0xff), rightRect, "CLOSE")
+	} else if p.closeOnLeft {
 		_ = canvas.FillRectanglePixels(p.closeBrush, leftRect)
 		_ = canvas.FillRectanglePixels(p.snoozeBrush, rightRect)
 		drawVerticalLetters(canvas, p.stripFont, walk.RGB(0xff, 0xff, 0xff), leftRect, "CLOSE")

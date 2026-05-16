@@ -45,13 +45,21 @@ Each tier can be independently enabled or disabled in Settings. Disabled tiers a
 
 ### Idle handling (the critical rule)
 
-- `idle ≥ idleResetSeconds` (default **300 s** = 5 min) → all counters **pause**.
-- The moment idle crosses that threshold, Limber pops up the **next-nearest-due** break (the enabled tier whose counter was closest to firing). This popup:
-  - has the same image + instructions + countdown as a normal popup,
-  - does **not** auto-close when the countdown reaches 0,
-  - **closes the instant** any mouse movement or keyboard activity is detected (the user has returned).
-- If a regular popup is already on screen at the moment idle starts, the idle popup is deferred. If that regular popup auto-completes while you're still idle, the idle popup is then fired so you always have something to dismiss on return.
-- On return, the shown tier's counter resets to 0 (treated as completed). Other tiers' counters resume from their paused values.
+Idle is treated in two stages: a **probe** to disambiguate "user is watching a movie at the keyboard" from "user walked away", then the real **break** popup once we're confident the user is away.
+
+1. `idle ≥ idleResetSeconds` (default **300 s** = 5 min) → all counters **pause**, and Limber shows the **idle probe** popup. The probe:
+   - is generic ("Are you still there?" — no exercise image),
+   - paints **both** edge strips as `CLOSE` (red); there is no snooze option,
+   - runs a `idleProbeSeconds` countdown (default **30 s**),
+   - is dismissed by **any** mouse/keyboard activity (the strip dwell is bypassed — the first real mouse move cancels it). A probe cancellation is treated as "user was here all along": no tier completes, counters resume from their pre-idle values.
+2. If the probe countdown reaches 0 with no activity, the user really is away. Limber:
+   - closes the probe,
+   - opens the actual **idle break** popup for the **next-nearest-due** enabled tier (image + instructions of that tier),
+   - does **not** auto-close when this break countdown reaches 0 — it keeps waiting,
+   - **closes the instant** any mouse movement or keyboard activity is detected.
+3. On return from a real idle (probe → break), the shown tier's counter resets to 0 (treated as completed); other tiers' counters resume from their paused values.
+
+If a regular popup is already on screen at the moment idle starts, the probe is deferred. If that regular popup auto-completes while you're still idle, the probe fires then so you always have something to dismiss on return.
 
 ### Reset menu vs. idle
 
@@ -139,6 +147,7 @@ All values are stored in `config.json` next to the binary. The settings window m
     "end":   "18:00"
   },
   "idleResetSeconds": 300,
+  "idleProbeSeconds": 30,
   "popup": {
     "corner":              "bottom-left", // top-left | top-right | bottom-left | bottom-right
     "width":               200,
@@ -192,7 +201,7 @@ Full-rest is an independent counter on its own `intervalMin`, not a substitution
 
 The settings window has tabs: **General**, **Popup**, **Micro**, **Full**, **Full-rest**, **Audio**.
 
-- **General** — working hours, idle-reset seconds, start-at-boot, log level.
+- **General** — working hours, idle-reset seconds, idle-probe seconds, start-at-boot, log level.
 - **Popup** — corner, width, height, horizontal/vertical padding, edge-trigger px, edge-dwell ms, snooze minutes.
 - **Micro / Full / Full-rest** — enable toggle, interval, duration, instructions, **image listbox** populated from any `.jpg` in `assets/exercises/`.
 - **Full** also lets you reorder / enable / disable individual rotation entries (read-only in v1 — edit `config.json` directly).
@@ -229,7 +238,9 @@ if idle >= idleResetSeconds:
     counters frozen
     if no popup is showing AND no idle popup has fired this idle session
        AND at least one tier is enabled:
-        fire next-nearest-due ENABLED tier as IDLE popup
+        fire IDLE PROBE popup ("are you still there?", 30 s, no snooze)
+    # probe → ResIdleProbeCancelled: counters resume (handled on idle exit)
+    # probe → ResIdleProbeExpired:   close probe, open idle break popup
     return
 
 # Active state.

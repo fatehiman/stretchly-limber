@@ -33,7 +33,7 @@ func (a *App) openSettings() {
 	// Field bindings.
 	var (
 		workStartLE, workEndLE                                                  *walk.LineEdit
-		idleResetNE                                                             *walk.NumberEdit
+		idleResetNE, idleProbeNE                                                *walk.NumberEdit
 		startAtBootCB                                                           *walk.CheckBox
 		logLevelCB                                                              *walk.ComboBox
 		cornerCB                                                                *walk.ComboBox
@@ -71,6 +71,7 @@ func (a *App) openSettings() {
 			workStartLE.SetText(def.WorkingHours.Start)
 			workEndLE.SetText(def.WorkingHours.End)
 			idleResetNE.SetValue(float64(def.IdleResetSeconds))
+			idleProbeNE.SetValue(float64(def.IdleProbeSeconds))
 			startAtBootCB.SetChecked(def.StartAtBoot)
 			cornerCB.SetCurrentIndex(indexOf(corners, def.Popup.Corner))
 			popupWNE.SetValue(float64(def.Popup.Width))
@@ -111,6 +112,7 @@ func (a *App) openSettings() {
 			newCfg.WorkingHours.Start = strings.TrimSpace(workStartLE.Text())
 			newCfg.WorkingHours.End = strings.TrimSpace(workEndLE.Text())
 			newCfg.IdleResetSeconds = int(idleResetNE.Value())
+			newCfg.IdleProbeSeconds = int(idleProbeNE.Value())
 			newCfg.StartAtBoot = startAtBootCB.Checked()
 			if i := cornerCB.CurrentIndex(); i >= 0 && i < len(corners) {
 				newCfg.Popup.Corner = corners[i]
@@ -219,6 +221,8 @@ func (a *App) openSettings() {
 							d.LineEdit{AssignTo: &workEndLE, Text: work.WorkingHours.End},
 							d.Label{Text: "Idle reset (seconds):"},
 							d.NumberEdit{AssignTo: &idleResetNE, MinValue: 30, MaxValue: 7200, Value: float64(work.IdleResetSeconds)},
+							d.Label{Text: "Idle probe (seconds):"},
+							d.NumberEdit{AssignTo: &idleProbeNE, MinValue: 5, MaxValue: 600, Value: float64(work.IdleProbeSeconds)},
 							d.Label{Text: "Start at boot:"},
 							d.CheckBox{AssignTo: &startAtBootCB, Checked: work.StartAtBoot},
 							d.Label{Text: "Log level:"},
@@ -358,6 +362,9 @@ func validate(c *config.Config) error {
 	}
 	if c.IdleResetSeconds < 30 {
 		return fmt.Errorf("idle reset must be at least 30 seconds")
+	}
+	if c.IdleProbeSeconds < 5 {
+		return fmt.Errorf("idle probe must be at least 5 seconds")
 	}
 	if c.Popup.Width < 160 || c.Popup.Height < 100 {
 		return fmt.Errorf("popup too small (min 160x100)")
